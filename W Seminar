@@ -1,0 +1,73 @@
+#include <driver/adc.h>
+#include <esp_adc_cal.h>
+
+#define PIR_PIN 14
+#define BODEN_PIN 34
+#define NUM_SAMPLES 20 
+
+#define ADC_CHANNEL ADC1_CHANNEL_6
+
+// Kalman-Filter Parameter angepasst
+float Q = 0.005;  // Prozessrauschen (starke Glättung, wie im Prototyp beschrieben)
+float R = 2.0;    // Messrauschen (empirisch ermittelt für stabile Glättung)
+float P = 1.0;
+float X = 0.0;    // Initialer Zustand
+
+unsigned long lastPrint = 0;
+const unsigned long interval = 300; // 3.3 Hz Ausgabe
+
+float kalmanUpdate(float measurement) {
+  P = P + Q;
+  float K = P / (P + R);
+  X = X + K * (measurement - X);
+  P = (1 - K) * P;
+  return X;
+}
+
+String fuzzyLogic(int pir, float boden) {
+  String bodenState;
+  if (boden < 0.90) bodenState = "ruhig"; // angepasst an Spannungsskalierung in Arbeit (z.B. 0.83V Ruhe)
+  else if (boden < 1.30) bodenState = "leicht_vibriert";  
+  else bodenState = "stark_vibriert";
+
+  if (pir == 0 && bodenState == "ruhig") return "keine Bewegung";
+  if (pir == 1 && bodenState == "ruhig") return "eher wahrscheinlich";
+  if (bodenState == "leicht_vibriert") return "wahrscheinlich Bewegung";
+  if (pir == 1 && bodenState == "stark_vibriert") return "sicher Bewegung";
+  if (bodenState == "stark_vibriert") return "wahrscheinlich Bewegung";
+  return "unbestimmt";
+}
+
+void setup() {
+  Serial.begin(115200);
+  adc1_config_width(ADC_WIDTH_BIT_12);
+  adc1_config_channel_atten(ADC_CHANNEL, ADC_ATTEN_DB_11);
+  pinMode(PIR_PIN, INPUT);
+  Serial.println("Zeit_ms,PIR,Bodenschall_V_Roh,Bodenschall_V_Kalman,Bewegung_Fuzzy");
+}
+
+void loop() {
+  unsigned long currentTime = millis();
+  if (currentTime - lastPrint >= interval) {
+    lastPrint = currentTime;
+
+    int pirValue = digitalRead(PIR_PIN);
+
+    long bodenRawSum = 0;
+    for (int i = 0; i < NUM_SAMPLES; i++) {
+      bodenRawSum += adc1_get_raw(ADC_CHANNEL);
+      delay(1);
+    }
+    int bodenRawAvg = bodenRawSum / NUM_SAMPLES;
+    float bodenVolt = bodenRawAvg * (3.3 / 4095.0);
+
+    float kalmanValue = kalmanUpdate(bodenVolt);
+    String fuzzyResult = fuzzyLogic(pirValue, kalmanValue);
+
+    Serial.print(currentTime); Serial.print(",");
+    Serial.print(pirValue); Serial.print(",");
+    Serial.print(bodenVolt, 3); Serial.print(",");
+    Serial.print(kalmanValue, 3); Serial.print(",");
+    Serial.println(fuzzyResult);
+  }
+}
