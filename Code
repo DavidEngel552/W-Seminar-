@@ -1,0 +1,91 @@
+#include <driver/adc.h>
+#include <esp_adc_cal.h>
+
+#define PIR_PIN 14
+#define BODEN_PIN 34
+#define LED_BUILTIN_ESP 2 
+#define NUM_SAMPLES 20 
+
+#define ADC_CHANNEL ADC1_CHANNEL_6
+
+// Zeitsteuerung für das Nachleuchten
+unsigned long ledOffTime = 0;       
+const long ledDuration = 5000;      // Auf 5000ms (5 Sekunden) geändert
+
+// Kalman-Filter Parameter
+float Q = 0.005;
+float R = 2.0;
+float P = 1.0;
+float X = 0.0;
+
+unsigned long lastPrint = 0;
+const unsigned long interval = 300;
+
+float kalmanUpdate(float measurement) {
+  P = P + Q;
+  float K = P / (P + R);
+  X = X + K * (measurement - X);
+  P = (1 - K) * P;
+  return X;
+}
+
+String fuzzyLogic(int pir, float boden) {
+  String bodenState;
+  if (boden < 0.90) bodenState = "ruhig";
+  else if (boden < 1.30) bodenState = "leicht_vibriert";  
+  else bodenState = "stark_vibriert";
+
+  if (pir == 0 && bodenState == "ruhig") return "keine Bewegung";
+  if (pir == 1 && bodenState == "ruhig") return "eher wahrscheinlich";
+  if (bodenState == "leicht_vibriert") return "wahrscheinlich Bewegung";
+  if (pir == 1 && bodenState == "stark_vibriert") return "sicher Bewegung";
+  if (bodenState == "stark_vibriert") return "wahrscheinlich Bewegung";
+  return "unbestimmt";
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(LED_BUILTIN_ESP, OUTPUT);
+  digitalWrite(LED_BUILTIN_ESP, LOW);
+
+  adc1_config_width(ADC_WIDTH_BIT_12);
+  adc1_config_channel_atten(ADC_CHANNEL, ADC_ATTEN_DB_11);
+  pinMode(PIR_PIN, INPUT);
+  
+  Serial.println("System bereit - LED leuchtet bei Bewegung für 5s.");
+}
+
+void loop() {
+  unsigned long currentTime = millis();
+
+  // Messintervall
+  if (currentTime - lastPrint >= interval) {
+    lastPrint = currentTime;
+
+    int pirValue = digitalRead(PIR_PIN);
+    long bodenRawSum = 0;
+    for (int i = 0; i < NUM_SAMPLES; i++) {
+      bodenRawSum += adc1_get_raw(ADC_CHANNEL);
+      delay(1); 
+    }
+    float bodenVolt = (bodenRawSum / (float)NUM_SAMPLES) * (3.3 / 4095.0);
+    float kalmanValue = kalmanUpdate(bodenVolt);
+    String fuzzyResult = fuzzyLogic(pirValue, kalmanValue);
+
+    // Trigger für die 5 Sekunden LED-Zeit
+    if (fuzzyResult == "wahrscheinlich Bewegung" || fuzzyResult == "sicher Bewegung") {
+      digitalWrite(LED_BUILTIN_ESP, HIGH); 
+      ledOffTime = currentTime + ledDuration; 
+    }
+
+    // Konsolenausgabe zur Überwachung
+    Serial.print("Boden: "); Serial.print(kalmanValue, 2); Serial.print("V | ");
+    Serial.print("PIR: "); Serial.print(pirValue); Serial.print(" | ");
+    Serial.println(fuzzyResult);
+  }
+
+  // LED-Check: Falls die Zeit abgelaufen ist, LED aus
+  if (currentTime >= ledOffTime) {
+    digitalWrite(LED_BUILTIN_ESP, LOW);
+  }
+}
